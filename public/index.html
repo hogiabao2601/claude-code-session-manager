@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude Sessions</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23d97757'/%3E%3Cpath d='M9 22l7-12 7 12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside class="side">
+    <div class="brand"><span class="logo"></span><b>Claude Sessions</b></div>
+    <nav id="nav">
+      <a href="#/" data-r="overview">Overview</a>
+      <a href="#/folders" data-r="folders">Folders</a>
+      <a href="#/sessions" data-r="sessions">Sessions</a>
+      <a href="#/search" data-r="search">Search</a>
+      <a href="#/usage" data-r="usage">Usage</a>
+    </nav>
+    <div class="side-foot">
+      <div id="indexStatus" class="muted small"></div>
+      <button id="reindex" class="btn ghost small">Rescan</button>
+      <button id="theme" class="btn ghost small">Theme</button>
+    </div>
+  </aside>
+  <main id="app"></main>
+  <div id="toast" class="toast"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

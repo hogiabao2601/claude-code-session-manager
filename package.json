@@ -1,0 +1,16 @@
+{
+  "name": "claude-code-session-manager",
+  "version": "0.1.0",
+  "description": "Light, read-only local web app to browse Claude Code sessions across multiple accounts and folders",
+  "keywords": ["claude", "claude-code", "sessions", "viewer", "multi-account"],
+  "license": "MIT",
+  "author": "hogiabao2601",
+  "repository": { "type": "git", "url": "git+https://github.com/hogiabao2601/claude-code-session-manager.git" },
+  "homepage": "https://github.com/hogiabao2601/claude-code-session-manager#readme",
+  "bugs": { "url": "https://github.com/hogiabao2601/claude-code-session-manager/issues" },
+  "private": false,
+  "bin": { "claude-code-session-manager": "server.js" },
+  "files": ["server.js", "pricing.json", "public"],
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
