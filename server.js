@@ -225,6 +225,17 @@ function costOf(usage) {
   return { usd, unpriced };
 }
 
+// ---------- plan usage snapshots (written by the Claude Code status line script, see README) ----------
+const SNAP_DIR = path.join(HOME, '.claude', 'usage-snapshots');
+function usageOf(id) {
+  let o;
+  try { o = JSON.parse(fs.readFileSync(path.join(SNAP_DIR, id + '.json'), 'utf8')); } catch { return null; }
+  const now = Date.now() / 1000;
+  const win = (w) => (w && typeof w.used_percentage === 'number'
+    ? { used: w.used_percentage, resetsAt: w.resets_at || null, expired: !!w.resets_at && w.resets_at <= now } : null);
+  return { savedAt: o.savedAt || null, fiveHour: win(o.five_hour), sevenDay: win(o.seven_day) };
+}
+
 // ---------- views over the index ----------
 function accountsView() {
   return accounts.map((a) => {
@@ -241,6 +252,7 @@ function accountsView() {
       cost: own.reduce((n, s) => n + costOf(s.usage).usd, 0),
       cost30d: own.filter((s) => s.end && Date.now() - Date.parse(s.end) < 30 * 864e5).reduce((n, s) => n + costOf(s.usage).usd, 0),
       lastActive: ss.reduce((m, s) => (s.end && s.end > m ? s.end : m), ''),
+      usage: usageOf(a.id),
       launch: a.isDefault ? 'claude' : `CLAUDE_CONFIG_DIR=${a.dir.replace(HOME, '~')} claude`,
     };
   });

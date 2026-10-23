@@ -50,3 +50,40 @@ Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
 ## License
 
 MIT
+
+## Run as a background app (`sessions.sh`)
+
+```bash
+./sessions.sh start -d      # start in the background, terminal is released
+./sessions.sh start         # foreground, Ctrl+C stops it
+./sessions.sh stop
+./sessions.sh restart -d
+./sessions.sh status
+```
+
+| Option | Description |
+|---|---|
+| `-d`, `--detach` | Run in the background (`start` / `restart`) |
+| `-p`, `--port N` | Port (default `4780`) |
+| `--dir PATH` | Extra Claude config dir to include (repeatable) |
+
+Server output goes to `logs/server.log`, script actions to `logs/sessions_<timestamp>.log`, and the PID to `.run/server.pid`.
+Exit codes: `0` ok, `1` error, `2` bad arguments, `3` `status` found it not running.
+A detached server does not survive a reboot; use a launchd agent for that.
+
+## Plan usage (5-hour / weekly limits)
+
+Account cards show the 5-hour and weekly plan usage, the percentage left and when each window resets. Claude Code only exposes these numbers to its **status line** script (`rate_limits` in the stdin JSON), so the script saves a snapshot per account to `~/.claude/usage-snapshots/<account>.json` and the dashboard reads those files. No OAuth tokens are read.
+
+Add this near the top of the script your `statusLine` runs. Every account's `settings.json` must run a script that does this. The account id is the config folder name without the leading dot.
+
+```sh
+snap_id=$(basename "${CLAUDE_CONFIG_DIR:-$HOME/.claude}" | sed 's/^\.//')
+mkdir -p "$HOME/.claude/usage-snapshots"
+echo "$input" | jq -c --arg acc "$snap_id" --argjson now "$(date +%s)" \
+  'select(.rate_limits.five_hour != null or .rate_limits.seven_day != null)
+   | {account:$acc, savedAt:$now, five_hour:.rate_limits.five_hour, seven_day:.rate_limits.seven_day}' \
+  > "$HOME/.claude/usage-snapshots/$snap_id.json"
+```
+
+A snapshot updates only while you use Claude Code in that account (after its first reply), so an idle account shows its last values marked as possibly out of date. Only Pro/Max subscriptions report these fields.

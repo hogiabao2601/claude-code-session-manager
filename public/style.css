@@ -14,12 +14,12 @@
   }
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; }
+html, body { margin: 0; min-height: 100%; }
 body { background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif; display: flex; }
 a { color: inherit; text-decoration: none; }
 .muted { color: var(--muted); } .small { font-size: 12px; } .mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px; }
 
-.side { width: 220px; flex: none; height: 100vh; position: sticky; top: 0; padding: 20px 14px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 18px; background: var(--panel2); }
+.side { width: 220px; flex: none; height: 100vh; align-self: flex-start; position: sticky; top: 0; padding: 20px 14px; border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: 18px; background: var(--panel2); }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 8px; font-size: 15px; }
 .logo { width: 22px; height: 22px; border-radius: 7px; background: var(--accent); display: inline-block; }
 #nav { display: flex; flex-direction: column; gap: 2px; }
@@ -43,6 +43,10 @@ input[type=search] { min-width: 260px; }
 
 .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 18px; box-shadow: var(--shadow); }
+.usage { margin-top: 12px; display: grid; gap: 8px; }
+.u-row { display: grid; grid-template-columns: 54px 1fr; gap: 4px 10px; align-items: center; font-size: 12px; }
+.u-row .lbl { color: var(--muted); } .u-bar { height: 8px; border-radius: 99px; background: var(--line); overflow: hidden; } .u-bar i { display: block; height: 100%; border-radius: 99px; }
+.u-row .txt { grid-column: 2; color: var(--muted); } .u-row .txt b { color: var(--text); font-weight: 600; }
 .card.link { cursor: pointer; transition: border-color .15s, transform .15s; } .card.link:hover { border-color: var(--accent); transform: translateY(-1px); }
 .acc-top { display: flex; align-items: center; gap: 12px; }
 .avatar { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; color: #fff; font-weight: 700; flex: none; }
@@ -65,13 +69,19 @@ input[type=search] { min-width: 260px; }
 .row.mrow { grid-template-columns: minmax(0, 1fr) repeat(4, 100px); }
 .row.th { cursor: default; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); background: var(--panel2); padding: 9px 18px; }
 .row.th:hover { background: var(--panel2); }
+.row.th .sortable { cursor: pointer; color: var(--text); } .row.th .sortable:hover { text-decoration: underline; }
 .t { font-weight: 550; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sub { color: var(--muted); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .right { text-align: right; } .chips { display: flex; gap: 6px; flex-wrap: wrap; }
 .gone { color: #c0554b; }
 .empty { padding: 40px; text-align: center; color: var(--muted); }
 
-.bars { display: flex; align-items: flex-end; gap: 3px; height: 70px; margin-top: 8px; }
+.bars { display: flex; align-items: flex-end; gap: 3px; height: 90px; margin-top: 8px; }
+.axis { display: flex; gap: 3px; margin-top: 6px; font-size: 11px; color: var(--muted); }
+.axis span { flex: 1; min-width: 0; position: relative; height: 14px; } .axis span b { font-weight: 400; position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap; }
+.range { font: inherit; font-size: 12px; margin-left: 6px; }
+.auto-msg { flex-basis: 100%; line-height: 1.35; } .auto-msg.ok { color: var(--accent); } .auto-msg.err { color: #d4493b; }
+.auto { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); flex-wrap: wrap; } .auto input[type=number] { width: 52px; font: inherit; padding: 2px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }
 .bars div { flex: 1; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; opacity: .85; }
 .bars div:hover { opacity: 1; }
 .grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; } @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
