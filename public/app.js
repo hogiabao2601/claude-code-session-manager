@@ -34,7 +34,7 @@ function usageBlock(u) {
   return `<div class="usage">${row('5-hour', u.fiveHour)}${row('Weekly', u.sevenDay)}<div class="muted small">${stale ? '⚠ ' : ''}Last seen ${age == null ? '—' : ago(new Date(u.savedAt * 1000).toISOString())}${stale ? ' · may be out of date; updates while you use Claude Code here' : ''}</div></div>`;
 }
 const dur = (a, b) => { const m = Math.round((new Date(b) - new Date(a)) / 60000); return m < 1 ? '<1 min' : m < 60 ? m + ' min' : (m / 60).toFixed(1) + ' h'; };
-let HOME = '';
+let HOME = '', TRASH = '';
 const short = (p) => (HOME && p.startsWith(HOME) ? '~' + p.slice(HOME.length) : p);
 const toast = (t) => { const el = $('#toast'); el.textContent = t; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 1400); };
 const copy = (t) => navigator.clipboard.writeText(t).then(() => toast('Copied'));
@@ -91,7 +91,7 @@ try {
 async function waitIndex() {
   for (;;) {
     const st = await api('status');
-    HOME = st.home;
+    HOME = st.home; TRASH = st.trash || '';
     const i = st.indexing;
     $('#indexStatus').textContent = i.running ? `Indexing ${i.done}/${i.total}…` : '';
     if (!i.running) break;
@@ -107,11 +107,20 @@ function accountFilter(sel) {
 }
 
 async function overview() {
+  cfgDetail.length = 0;
   const [stats, recent, top] = await Promise.all([api('stats'), api('sessions?limit=8'), api('sessions?limit=10&sort=cost')]);
   let range = 60; try { range = Number(localStorage.getItem('range')) || 60; } catch {}
-  const days = [];
-  for (let i = range - 1; i >= 0; i--) { const d = new Date(Date.now() - i * 864e5).toISOString().slice(0, 10); days.push([d, stats.perDay[d] || 0]); }
-  const max = Math.max(1, ...days.map((d) => d[1]));
+  let perDayView = 'combined'; try { perDayView = localStorage.getItem('perDayView') === 'accounts' ? 'accounts' : 'combined'; } catch {}
+  const dayKeys = [];
+  for (let i = range - 1; i >= 0; i--) dayKeys.push(new Date(Date.now() - i * 864e5).toISOString().slice(0, 10));
+  const chart = (counts, color) => {
+    const vals = dayKeys.map((d) => counts[d] || 0), max = Math.max(1, ...vals), step = Math.ceil(dayKeys.length / 8);
+    return `<div class="bars">${dayKeys.map((d, i) => `<div title="${d}: ${vals[i]}" style="height:${(vals[i] / max) * 100}%${color ? ';background:' + color : ''}"></div>`).join('')}</div><div class="axis">${dayKeys.map((d, i) => `<span>${(dayKeys.length - 1 - i) % step === 0 ? `<b>${new Date(d + 'T00:00:00Z').toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' })}</b>` : ''}</span>`).join('')}</div>`;
+  };
+  const total = (counts) => dayKeys.reduce((n, d) => n + (counts[d] || 0), 0);
+  const perDayHtml = perDayView === 'accounts'
+    ? accounts.map((a) => `<div class="card" style="margin-bottom:10px"><div class="chart-head">${chip(a.id)}<span class="muted small">${total(stats.perDayAccount[a.id] || {})} sessions · peak ${Math.max(0, ...dayKeys.map((d) => (stats.perDayAccount[a.id] || {})[d] || 0))}/day</span></div>${chart(stats.perDayAccount[a.id] || {}, accColor(a.id))}</div>`).join('')
+    : `<div class="card"><div class="chart-head"><span class="muted small">All accounts combined</span><span class="muted small">${total(stats.perDay)} sessions · peak ${Math.max(0, ...dayKeys.map((d) => stats.perDay[d] || 0))}/day</span></div>${chart(stats.perDay)}</div>`;
   const models = Object.entries(stats.models).sort((a, b) => b[1] - a[1]).slice(0, 6);
   app.innerHTML = `
     <div class="head"><div><h1>Overview</h1><div class="muted">${accounts.length} account${accounts.length === 1 ? '' : 's'} · ${stats.totalSessions - stats.copies} sessions found on this Mac${stats.copies ? ` (+${stats.copies} copies shared between accounts)` : ''} · ${fmtN(stats.tokens)} tokens · <b>${fmtCost(stats.cost)}</b> estimated API-equivalent cost</div></div></div>
@@ -122,16 +131,18 @@ async function overview() {
         <div class="kv"><div><b>${a.folders}</b><span>folders</span></div><div><b>${a.sessions}</b><span>sessions</span></div><div><b>${ago(a.lastActive)}</b><span>last active</span></div>
           <div><b>${fmtN(a.tokens)}</b><span>tokens</span></div><div><b>${fmtCost(a.cost)}</b><span>est. cost</span></div><div><b>${fmtCost(a.cost30d)}</b><span>last 30 days</span></div></div>
         ${usageBlock(a.usage)}
+        <div class="muted small" style="margin-top:12px">Global configuration</div>${cfgPills(a.config, 'Global · ' + accShort(a.id))}
         <div class="muted small" style="margin-top:12px">Config <span class="mono">${esc(a.dir)}</span></div>
         <div class="cmd"><code class="mono">${esc(a.launch)}</code><button class="btn small" data-copy="${esc(a.launch)}">Copy</button></div>
       </div>`).join('')}</div>
     <div class="grid2">
-      <div><h2>Sessions per day · last <select id="range" class="range">${[7, 14, 30, 60, 90, 180, 365].map((n) => `<option value="${n}" ${n === range ? 'selected' : ''}>${n}</option>`).join('')}</select> days</h2><div class="card"><div class="bars">${days.map(([d, n]) => `<div title="${d}: ${n}" style="height:${(n / max) * 100}%"></div>`).join('')}</div><div class="axis">${days.map(([d], i) => `<span>${(days.length - 1 - i) % Math.ceil(days.length / 8) === 0 ? `<b>${new Date(d + 'T00:00:00Z').toLocaleDateString(undefined, { day: 'numeric', month: 'short', timeZone: 'UTC' })}</b>` : ''}</span>`).join('')}</div></div></div>
+      <div><h2>Sessions per day · last <select id="range" class="range">${[7, 14, 30, 60, 90, 180, 365].map((n) => `<option value="${n}" ${n === range ? 'selected' : ''}>${n}</option>`).join('')}</select> days <select id="perDayView" class="range"><option value="combined" ${perDayView === 'combined' ? 'selected' : ''}>combined</option><option value="accounts" ${perDayView === 'accounts' ? 'selected' : ''}>per account</option></select></h2>${perDayHtml}</div>
       <div><h2>Models used</h2><div class="card">${models.map(([m, n]) => `<div class="model-row"><span>${esc(m)}</span><span class="muted">${fmtN(n)} replies</span></div>`).join('') || '<span class="muted">—</span>'}</div></div>
     </div>
     <h2>Most expensive sessions</h2>${sessionTable(top)}
     <h2>Recent sessions</h2>${sessionTable(recent)}
     <p class="muted small">Cost is an estimate: tokens × Anthropic API list prices${stats.pricingUpdated ? ' (as of ' + esc(stats.pricingUpdated) + ')' : ''}, including prompt-cache reads and writes. Subscription plans (Pro, Max, Team) are not billed per token, so treat it as relative usage. Prices live in <span class="mono">pricing.json</span>.${stats.unpriced.length ? ' <b>No price for:</b> ' + esc(stats.unpriced.join(', ')) + '.' : ''}</p>`;
+  $('#perDayView').onchange = (e) => { try { localStorage.setItem('perDayView', e.target.value); } catch {} overview(); };
   $('#range').onchange = (e) => { try { localStorage.setItem('range', e.target.value); } catch {} overview(); };
 }
 
@@ -142,6 +153,101 @@ function lastActiveTh(page, params, extra = {}) {
   for (const k of ['q', 'account']) if (params.get(k)) p.set(k, params.get(k));
   if (!asc) p.set('dir', 'asc');
   return `<span class="right sortable" data-go="#/${page}?${p}">Last active ${asc ? '↑' : '↓'}</span>`;
+}
+
+const CFG_KINDS = [['hooks', 'hooks'], ['plugins', 'plugins'], ['skills', 'skills'], ['agents', 'agents'], ['mcp', 'MCP']];
+const cfgDetail = [];
+function cfgPills(c, scope = '') {
+  if (!c) return '';
+  return `<div class="cfg">${CFG_KINDS.map(([k, label]) => {
+    const x = c[k] || { count: 0, names: [] };
+    const names = (x.names || []);
+    const tip = names.length ? names.slice(0, 60).join(', ') + (names.length > 60 ? ` … +${names.length - 60} more` : '') : 'none';
+    const extra = k === 'plugins' && x.installed != null ? ` <span class="muted">/ ${x.installed} installed</span>` : '';
+    const idx = cfgDetail.push({ title: `${scope ? scope + ' · ' : ''}${label}`, names, installed: x.installed, kind: k }) - 1;
+    return `<span class="pill ${x.count ? '' : 'zero'}" data-detail="${idx}" title="Click for details"><b>${x.count}</b> ${label}${extra}</span>`;
+  }).join('')}</div>`;
+}
+
+async function artifacts(params) {
+  const q = (params.get('q') || '').toLowerCase(), acc = params.get('account') || '', cwd = params.get('cwd') || '';
+  const group = params.get('group') === 'folder', hideGone = params.get('deleted') !== '1';
+  const all = await api('artifacts');
+  const folderSet = [...new Set(all.map((a) => a.cwd))].sort();
+  let list = all.filter((a) => (!acc || a.accounts.includes(acc)) && (!cwd || a.cwd === cwd) && (!hideGone || !a.deleted)
+    && (!q || [a.name, a.description, a.file, a.cwd, a.id, ...a.sessions.map((s) => s.title)].some((x) => x && x.toLowerCase().includes(q))));
+  const row = (a) => {
+    const s = a.sessions[0];
+    return `<div class="row art">
+      <div style="min-width:0"><a class="t ${a.deleted ? 'gone-art' : ''}" href="${esc(a.url)}" target="_blank" rel="noopener" title="Open in claude.ai">${hl(a.name, q)}</a>${a.deleted ? ' <span class="tag">deleted</span>' : ''}<div class="sub">${hl(a.description || '', q)}</div></div>
+      <div style="min-width:0"><a href="#/sessions?cwd=${encodeURIComponent(a.cwd)}" class="sub" title="${esc(a.cwd)}">${esc(short(a.cwd))}</a></div>
+      <div style="min-width:0"><a href="#/session/${esc(s.account)}/${esc(s.id)}" class="sub" title="Open the session that published it">${esc(s.title || s.id)}</a>${a.sessions.length > 1 ? `<div class="muted small">+${a.sessions.length - 1} more session${a.sessions.length > 2 ? 's' : ''}</div>` : ''}</div>
+      <div>${a.accounts.map((x) => chip(x)).join(' ')}</div>
+      <div class="right muted" title="Created ${esc(new Date(a.created).toLocaleString())}">${ago(a.updated)}<div class="small">${a.publishes} publish${a.publishes === 1 ? '' : 'es'}</div></div>
+      <div class="right"><button class="btn small" data-copy="${esc(a.url)}">Copy link</button></div>
+    </div>`;
+  };
+  const head = '<div class="row art th"><span>Artifact</span><span>Folder</span><span>Published from session</span><span>Account</span><span class="right">Updated</span><span></span></div>';
+  let body;
+  if (!list.length) body = '<div class="table"><div class="empty">No artifacts match.</div></div>';
+  else if (group) {
+    const g = new Map(); for (const a of list) (g.get(a.cwd) || g.set(a.cwd, []).get(a.cwd)).push(a);
+    body = [...g.entries()].map(([c, items]) => `<div class="group-h">${esc(short(c))} <span class="muted small">${items.length} artifact${items.length === 1 ? '' : 's'}</span></div><div class="table">${head}${items.map(row).join('')}</div>`).join('');
+  } else body = `<div class="table">${head}${list.map(row).join('')}</div>`;
+  app.innerHTML = `
+    <div class="head"><div><h1>Artifacts</h1><div class="muted">${list.length} of ${all.length} artifact${all.length === 1 ? '' : 's'} published from your sessions</div></div>
+      <div class="tools"><input type="search" id="fQ" placeholder="Search name, description, folder, session…" value="${esc(params.get('q') || '')}">${accountFilter(acc)}
+        <select id="fCwd"><option value="">All folders</option>${folderSet.map((c) => `<option value="${esc(c)}" ${c === cwd ? 'selected' : ''}>${esc(short(c))}</option>`).join('')}</select>
+        <select id="fGroup"><option value="">Flat list</option><option value="folder" ${group ? 'selected' : ''}>Group by folder</option></select>
+        <label class="muted small"><input type="checkbox" id="fDel" ${hideGone ? '' : 'checked'}> show deleted</label></div></div>
+    <p class="muted small">Found by reading the Artifact tool calls in your session transcripts, so it lists artifacts published from Claude Code on this Mac. Click a name to open it on claude.ai (sign in with the account shown). Artifacts can only be deleted on claude.ai.</p>
+    ${body}`;
+  const go = () => {
+    const p = new URLSearchParams();
+    if ($('#fQ').value) p.set('q', $('#fQ').value);
+    if ($('#fAcc').value) p.set('account', $('#fAcc').value);
+    if ($('#fCwd').value) p.set('cwd', $('#fCwd').value);
+    if ($('#fGroup').value) p.set('group', $('#fGroup').value);
+    if ($('#fDel').checked) p.set('deleted', '1');
+    location.hash = `#/artifacts?${p}`;
+  };
+  for (const id of ['#fAcc', '#fCwd', '#fGroup', '#fDel']) $(id).onchange = go;
+  let t; $('#fQ').oninput = () => { clearTimeout(t); t = setTimeout(() => { go(); const el = $('#fQ'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); }, 350); };
+  const el = $('#fQ'); if (el.value) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+}
+
+async function projects(params) {
+  cfgDetail.length = 0;
+  const q = (params.get('q') || '').toLowerCase(), acc = params.get('account') || '';
+  let list = await api('projects');
+  if (acc) list = list.filter((f) => f.accounts.includes(acc));
+  if (q) list = list.filter((f) => f.cwd.toLowerCase().includes(q) || f.sessions.some((s) => [s.title, s.firstPrompt, s.id].some((x) => x && x.toLowerCase().includes(q))));
+  const open = new Set((params.get('open') || '').split(',').filter(Boolean));
+  const missing = list.filter((f) => !f.exists);
+  const removable = missing.filter((f) => f.removable);
+  if (params.get('missing')) list = missing;
+  app.innerHTML = `
+    <div class="head"><div><h1>Projects</h1><div class="muted">${list.length} folder${list.length === 1 ? '' : 's'} · ${list.reduce((n, f) => n + f.sessionCount, 0)} sessions · with the hooks, plugins, skills, agents and MCP servers configured for each folder</div></div>
+      <div class="tools"><input type="search" id="fQ" placeholder="Filter folders, sessions, ids…" value="${esc(params.get('q') || '')}">${accountFilter(acc)}</div></div>
+    ${missing.length ? `<div class="cfg" style="margin:0 0 14px;align-items:center"><span class="muted">${missing.length} folder${missing.length === 1 ? '' : 's'} no longer exist</span> <a class="btn small" href="#/projects?${new URLSearchParams({ ...(params.get('missing') ? {} : { missing: 1 }), ...(acc ? { account: acc } : {}) })}">${params.get('missing') ? 'Show all folders' : 'Show only missing'}</a>${removable.length ? `<button class="btn small danger" data-remove-all="${removable.length}" data-sessions="${removable.reduce((n, f) => n + f.sessionCount, 0)}">Remove all missing (${removable.length})</button>` : ''}</div>` : ''}
+    <p class="muted small">Counts are project-level files only (<span class="mono">.claude/settings*.json</span>, <span class="mono">.claude/skills</span>, <span class="mono">.claude/agents</span>, <span class="mono">.mcp.json</span>, and MCP servers saved for the folder). Global ones are on the Overview page. Hover a pill to see the names.</p>
+    ${list.map((f) => `
+      <details class="proj" ${open.has(f.cwd) || q ? 'open' : ''}>
+        <summary>
+          <div style="min-width:0"><div class="ptitle">${esc(short(f.cwd).split('/').pop() || f.cwd)}</div><div class="sub ${f.exists ? '' : 'gone'}" style="margin-left:16px">${esc(short(f.cwd))}${f.exists ? '' : ' · folder no longer exists'}</div></div>
+          <div class="pmeta"><div>${f.accounts.map((a) => chip(a)).join(' ')}</div><div class="muted small">${f.sessionCount} session${f.sessionCount === 1 ? '' : 's'} · ${ago(f.lastActive)}</div>${f.removable ? `<button class="btn small danger" style="margin-top:6px" data-remove="${esc(f.cwd)}" data-sessions="${f.sessionCount}">Remove</button>` : ''}</div>
+          ${f.config ? cfgPills(f.config, short(f.cwd).split('/').pop() || f.cwd) : '<div class="muted small" style="grid-column:1/-1;margin-left:16px">No configuration to read (folder is gone).</div>'}
+        </summary>
+        <div class="psess"><div class="prow th"><span>Session</span><span>Session ID</span><span>Last message</span><span class="right">Last active</span></div>
+          ${f.sessions.map((s) => `
+          <div class="prow" data-go="#/session/${esc(s.account)}/${esc(s.id)}">
+            <div style="min-width:0"><div class="t">${hl(title(s), q)}</div><div class="sub">${chip(s.account)} ${s.copy ? '<span class="tag">copy</span> ' : ''}<span class="muted">${s.messages} msgs</span></div></div>
+            <div class="sid"><code class="mono">${hl(s.id, q)}</code><button class="btn small" data-copy="${esc(s.id)}">Copy</button></div>
+            <div class="lm">${s.lastMessage ? `<b>${s.lastMessage.role === 'user' ? 'You' : 'Claude'}:</b> ${esc(s.lastMessage.text.replace(/\s+/g, ' '))}` : '<span class="muted">—</span>'}</div>
+            <div class="right muted">${ago(s.end)}</div>
+          </div>`).join('')}</div>
+      </details>`).join('') || '<div class="table"><div class="empty">No folders match.</div></div>'}`;
+  bindFilters('projects');
 }
 
 function sessionTable(list, q, activeTh = '<span class="right">Last active</span>') {
@@ -283,12 +389,42 @@ async function route() {
   window.scrollTo(0, 0);
   if (r === 'overview') await overview();
   else if (r === 'folders') await folders(params);
+  else if (r === 'projects') await projects(params);
+  else if (r === 'artifacts') await artifacts(params);
   else if (r === 'sessions') await sessions(params);
   else if (r === 'session') await session(parts[1], parts[2]);
   else if (r === 'search') await search(params);
   else if (r === 'usage') usage();
 }
+async function removeMissing(cwd, nSessions, nFolders) {
+  const what = cwd ? `the ${nSessions} session${nSessions === 1 ? '' : 's'} of ${short(cwd)}` : `${nSessions} session${nSessions === 1 ? '' : 's'} from ${nFolders} missing folder${nFolders === 1 ? '' : 's'}`;
+  if (!confirm(`Remove ${what} from Claude Code?\n\nThe folder no longer exists on disk. The session files are moved to a trash folder, not deleted, so you can restore them${TRASH ? ' from ' + short(TRASH) : ''}.`)) return;
+  const r = await fetch('/api/remove-missing', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cwd: cwd || null }) }).then((x) => x.json()).catch((e) => ({ error: String(e) }));
+  if (r.error) return toast(r.error);
+  toast(r.sessions ? `Moved ${r.sessions} session${r.sessions === 1 ? '' : 's'} to trash` : 'Nothing to remove');
+  if (r.trash) console.info('Trash:', r.trash);
+  waitIndex();
+}
+function showDetail(d) {
+  const bg = document.createElement('div'); bg.className = 'modal-bg';
+  const render = (q) => {
+    const list = d.names.filter((n) => !q || n.toLowerCase().includes(q));
+    return list.length ? `<ul>${list.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : '<div class="muted" style="padding:12px 0">None.</div>';
+  };
+  bg.innerHTML = `<div class="modal" role="dialog"><header><h3>${esc(d.title)} <span class="muted">(${d.names.length}${d.kind === 'plugins' && d.installed != null ? ` enabled of ${d.installed} installed` : ''})</span></h3><button class="btn small" data-close>Close</button></header>
+    <div class="mbody">${d.names.length > 8 ? '<input type="search" placeholder="Filter…">' : ''}<div id="mlist">${render('')}</div></div></div>`;
+  const close = () => { bg.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  bg.onclick = (e) => { if (e.target === bg || e.target.closest('[data-close]')) close(); };
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(bg);
+  const inp = bg.querySelector('input'); if (inp) { inp.oninput = () => { bg.querySelector('#mlist').innerHTML = render(inp.value.toLowerCase()); }; inp.focus(); }
+}
 document.addEventListener('click', (e) => {
+  const pill = e.target.closest('[data-detail]');
+  if (pill) { e.preventDefault(); e.stopPropagation(); return showDetail(cfgDetail[Number(pill.dataset.detail)]); }
+  const rm = e.target.closest('[data-remove], [data-remove-all]');
+  if (rm) { e.preventDefault(); e.stopPropagation(); return removeMissing(rm.dataset.remove || null, Number(rm.dataset.sessions), Number(rm.dataset.removeAll || 1)); }
   const c = e.target.closest('[data-copy]'); if (c) { e.stopPropagation(); return copy(c.dataset.copy); }
   const g = e.target.closest('[data-go]'); if (g) location.hash = g.dataset.go;
 });

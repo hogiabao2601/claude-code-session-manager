@@ -63,7 +63,7 @@ async function discoverAccounts() {
 }
 
 // ---------- session summary index (cached on disk by mtime+size) ----------
-const CACHE_VERSION = 2; // bump when summary fields change
+const CACHE_VERSION = 5; // bump when summary fields change
 let cache = {};
 try { cache = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')); } catch { /* fresh */ }
 if (cache.__v !== CACHE_VERSION) cache = { __v: CACHE_VERSION };
@@ -77,12 +77,25 @@ const textOf = (content) => {
 };
 const decodeDir = (name) => name.replace(/^-/, '/').replace(/-/g, '/');
 
+async function htmlTitle(file) {
+  if (!file || !/\.html?$/i.test(file)) return null;
+  const fh = await fsp.open(file, 'r').catch(() => null);
+  if (!fh) return null;
+  try {
+    const buf = Buffer.alloc(16384);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    const m = buf.toString('utf8', 0, bytesRead).match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    return m ? m[1].replace(/\s+/g, ' ').trim().slice(0, 200) || null : null;
+  } finally { await fh.close(); }
+}
+
 async function summarize(file, projectDir) {
   const s = {
     cwd: null, branch: null, title: null, firstPrompt: null, start: null, end: null,
     user: 0, assistant: 0, tools: 0, tokensIn: 0, tokensOut: 0, cacheRead: 0, cacheWrite: 0,
-    models: {}, usage: {}, entrypoint: null, version: null, subagents: 0,
+    models: {}, usage: {}, entrypoint: null, version: null, subagents: 0, lastMessage: null, artifacts: [],
   };
+  const pendingArt = new Map(); // Artifact tool_use id -> input, resolved by its tool_result
   const seenMsg = new Set(); // Claude Code logs one record per content block; usage repeats per message id
   const rl = readline.createInterface({ input: fs.createReadStream(file, { encoding: 'utf8' }), crlfDelay: Infinity });
   for await (const line of rl) {
@@ -96,10 +109,31 @@ async function summarize(file, projectDir) {
     if (o.type === 'ai-title' || o.type === 'custom-title') s.title = o.aiTitle || o.customTitle || o.title || s.title;
     if (o.type === 'summary' && o.summary && !s.title) s.title = o.summary;
     if (o.isSidechain) continue;
+    if (o.type === 'assistant' && o.message && Array.isArray(o.message.content)) {
+      for (const b of o.message.content) {
+        if (b && b.type === 'tool_use' && b.name === 'Artifact' && b.input && ['publish', 'delete'].includes(b.input.action || 'publish')) pendingArt.set(b.id, { input: b.input, ts: o.timestamp });
+      }
+    } else if (o.type === 'user' && o.message && Array.isArray(o.message.content) && pendingArt.size) {
+      for (const b of o.message.content) {
+        const p = b && b.type === 'tool_result' && !b.is_error && pendingArt.get(b.tool_use_id);
+        if (!p) continue;
+        pendingArt.delete(b.tool_use_id);
+        const rt = typeof b.content === 'string' ? b.content : textOf(b.content);
+        const m = rt.match(/https:\/\/claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9-]+)/);
+        const inp = p.input;
+        if ((inp.action || 'publish') === 'delete') {
+          const d = (inp.url || '').match(/artifact\/([A-Za-z0-9-]+)/);
+          if (d && !inp.path) s.artifacts.push({ id: d[1], deleted: true, ts: p.ts });
+        } else if (m && /^(Published|Created)/.test(rt.trim()) && !inp.asset) {
+          s.artifacts.push({ id: m[1], url: m[0], title: inp.title || null, description: inp.description || null, file: inp.file_path || null, htmlTitle: await htmlTitle(inp.file_path), ts: p.ts });
+        }
+      }
+    }
     if (o.type === 'user' && o.message) {
       const t = textOf(o.message.content);
       if (t && !o.isMeta && !isSystemText(t)) {
         s.user++;
+        s.lastMessage = { role: 'user', text: t.trim().slice(0, 240) };
         if (!s.firstPrompt) s.firstPrompt = t.trim().slice(0, 300);
       }
     } else if (o.type === 'assistant' && o.message) {
@@ -111,6 +145,7 @@ async function summarize(file, projectDir) {
         s.assistant++;
         if (m && m !== '<synthetic>') s.models[m] = (s.models[m] || 0) + 1;
       }
+      if (m !== '<synthetic>') { const at = textOf(o.message.content).trim(); if (at) s.lastMessage = { role: 'assistant', text: at.slice(0, 240) }; }
       if (Array.isArray(o.message.content)) s.tools += o.message.content.filter((b) => b.type === 'tool_use').length;
       const u = o.message.usage;
       if (u && m && m !== '<synthetic>') {
@@ -134,6 +169,7 @@ async function summarize(file, projectDir) {
   delete s.msgUsage;
   const sub = path.join(path.dirname(file), path.basename(file, '.jsonl'), 'subagents');
   s.subagents = (await fsp.readdir(sub).catch(() => [])).filter((f) => f.endsWith('.jsonl')).length;
+  s.cwdKnown = !!s.cwd; // false: cwd is only guessed from the (lossy) folder name
   if (!s.cwd) s.cwd = decodeDir(projectDir);
   return s;
 }
@@ -225,6 +261,74 @@ function costOf(usage) {
   return { usd, unpriced };
 }
 
+// ---------- Claude Code configuration: hooks, plugins, skills, agents, MCP ----------
+// Counts what is configured in files (global per account, and per project folder). Plugin-provided
+// skills/agents/hooks are not expanded; plugins are counted as plugins.
+const readJsonSync = (p) => { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch { return null; } };
+const entriesOf = (dir) => { try { return fs.readdirSync(dir, { withFileTypes: true }); } catch { return []; } };
+const isDirLike = (dir, e) => e.isDirectory() || (e.isSymbolicLink() && (() => { try { return fs.statSync(path.join(dir, e.name)).isDirectory(); } catch { return false; } })());
+const item = (names) => ({ count: names.length, names });
+
+function skillNames(dir) {
+  return entriesOf(dir).filter((e) => !e.name.startsWith('.') && (isDirLike(dir, e) || e.name.endsWith('.md'))).map((e) => e.name.replace(/\.md$/, '')).sort();
+}
+function agentNames(dir) {
+  const out = [];
+  const walk = (d, depth) => {
+    for (const e of entriesOf(d)) {
+      if (e.name.startsWith('.')) continue;
+      if (isDirLike(d, e) && depth < 2) walk(path.join(d, e.name), depth + 1);
+      else if (e.name.endsWith('.md') && !/^readme\.md$/i.test(e.name)) out.push(e.name.replace(/\.md$/, ''));
+    }
+  };
+  walk(dir, 0);
+  return out.sort();
+}
+function hookNames(...settings) {
+  const out = [];
+  for (const s of settings) {
+    for (const [ev, matchers] of Object.entries((s && s.hooks) || {})) {
+      for (const m of Array.isArray(matchers) ? matchers : []) for (const h of (m && m.hooks) || []) {
+        const what = h.command || h.prompt || h.url || h.type || '';
+        out.push(ev + (m.matcher ? ` (${m.matcher})` : '') + (what ? ' → ' + String(what).replace(/\s+/g, ' ').slice(0, 160) : ''));
+      }
+    }
+  }
+  return out;
+}
+const enabledPlugins = (...settings) => [...new Set(settings.flatMap((s) => Object.entries((s && s.enabledPlugins) || {}).filter(([, v]) => v).map(([k]) => k)))].sort();
+const mcpNames = (...sources) => [...new Set(sources.flatMap((s) => Object.keys((s && s.mcpServers) || {})))].sort();
+
+function claudeJsonOf(acc) {
+  return readJsonSync(path.join(acc.dir, '.claude.json')) || (acc.isDefault ? readJsonSync(path.join(HOME, '.claude.json')) : null);
+}
+function accountConfig(acc) {
+  const settings = readJsonSync(path.join(acc.dir, 'settings.json')) || {};
+  const installed = readJsonSync(path.join(acc.dir, 'plugins', 'installed_plugins.json'));
+  const plugins = item(enabledPlugins(settings));
+  plugins.installed = installed && installed.plugins ? Object.keys(installed.plugins).length : null;
+  return {
+    hooks: item(hookNames(settings)),
+    plugins,
+    skills: item(skillNames(path.join(acc.dir, 'skills'))),
+    agents: item(agentNames(path.join(acc.dir, 'agents'))),
+    mcp: item(mcpNames(claudeJsonOf(acc), settings)),
+  };
+}
+function projectConfig(cwd, accs) {
+  const dot = path.join(cwd, '.claude');
+  const shared = readJsonSync(path.join(dot, 'settings.json')) || {};
+  const local = readJsonSync(path.join(dot, 'settings.local.json')) || {};
+  const perAccount = accs.map((a) => { const c = claudeJsonOf(a); return c && c.projects && c.projects[cwd]; });
+  return {
+    hooks: item(hookNames(shared, local)),
+    plugins: item(enabledPlugins(shared, local)),
+    skills: item(skillNames(path.join(dot, 'skills'))),
+    agents: item(agentNames(path.join(dot, 'agents'))),
+    mcp: item(mcpNames(readJsonSync(path.join(cwd, '.mcp.json')), shared, local, ...perAccount)),
+  };
+}
+
 // ---------- plan usage snapshots (written by the Claude Code status line script, see README) ----------
 const SNAP_DIR = path.join(HOME, '.claude', 'usage-snapshots');
 function usageOf(id) {
@@ -253,6 +357,7 @@ function accountsView() {
       cost30d: own.filter((s) => s.end && Date.now() - Date.parse(s.end) < 30 * 864e5).reduce((n, s) => n + costOf(s.usage).usd, 0),
       lastActive: ss.reduce((m, s) => (s.end && s.end > m ? s.end : m), ''),
       usage: usageOf(a.id),
+      config: accountConfig(a),
       launch: a.isDefault ? 'claude' : `CLAUDE_CONFIG_DIR=${a.dir.replace(HOME, '~')} claude`,
     };
   });
@@ -270,6 +375,88 @@ function foldersView() {
   const list = [...map.values()];
   for (const f of list) f.exists = fs.existsSync(f.cwd);
   return list.sort((a, b) => b.lastActive.localeCompare(a.lastActive));
+}
+
+// ---------- remove sessions of folders that no longer exist (moved to a trash folder, recoverable) ----------
+const TRASH_DIR = path.join(path.dirname(CACHE_FILE), 'trash');
+async function removeMissing(cwd) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const groups = new Map(); // account + projectDir -> files
+  let folders = new Set(), count = 0;
+  for (const s of sessions) {
+    if (cwd && s.cwd !== cwd) continue;
+    if (s.cwdKnown === false || fs.existsSync(s.cwd)) continue; // re-checked now, never trust the UI
+    const acc = accounts.find((a) => a.id === s.account);
+    if (!acc) continue;
+    const root = path.join(acc.dir, 'projects', s.projectDir);
+    const key = acc.id + '\0' + s.projectDir;
+    if (!groups.has(key)) groups.set(key, { acc, root, ids: [] });
+    groups.get(key).ids.push(s.id);
+    folders.add(s.cwd);
+  }
+  for (const g of groups.values()) {
+    const dest = path.join(TRASH_DIR, stamp, g.acc.id, path.basename(g.root));
+    await fsp.mkdir(dest, { recursive: true });
+    for (const id of g.ids) {
+      for (const name of [id + '.jsonl', id]) {
+        const from = path.join(g.root, name);
+        if (path.dirname(from) !== g.root || !(await exists(from))) continue;
+        await fsp.rename(from, path.join(dest, name));
+        if (name.endsWith('.jsonl')) count++;
+      }
+    }
+  }
+  if (count) buildIndex();
+  return { sessions: count, folders: folders.size, trash: count ? path.join(TRASH_DIR, stamp) : null };
+}
+
+// ---------- artifacts published from sessions ----------
+function artifactsView() {
+  const byId = new Map();
+  for (const s of sessions) {
+    if (s.copyOf || !(s.artifacts || []).length) continue;
+    for (const a of s.artifacts) {
+      let r = byId.get(a.id);
+      if (!r) { r = { id: a.id, url: null, names: [], description: null, file: null, created: null, updated: null, publishes: 0, deleted: false, sessions: new Map() }; byId.set(a.id, r); }
+      if (a.deleted) { if (!r.deletedAt || a.ts > r.deletedAt) r.deletedAt = a.ts; continue; }
+      r.publishes++;
+      r.url = r.url || a.url;
+      if (!r.created || a.ts < r.created) r.created = a.ts;
+      if (!r.updated || a.ts > r.updated) { r.updated = a.ts; r.description = a.description || r.description; r.file = a.file || r.file; }
+      for (const n of [a.title, a.htmlTitle]) if (n) r.names.push([a.ts, n]);
+      const k = s.account + ':' + s.id;
+      const cur = r.sessions.get(k);
+      if (!cur) r.sessions.set(k, { account: s.account, id: s.id, title: s.title || (s.firstPrompt || '').slice(0, 80), cwd: s.cwd, first: a.ts, count: 1 });
+      else { cur.count++; if (a.ts < cur.first) cur.first = a.ts; }
+    }
+  }
+  const base = (f) => (f ? path.basename(f).replace(/\.[^.]+$/, '') : null);
+  return [...byId.values()].filter((r) => r.url).map((r) => {
+    const names = r.names.sort((a, b) => b[0].localeCompare(a[0]));
+    const ss = [...r.sessions.values()].sort((a, b) => a.first.localeCompare(b.first));
+    return { id: r.id, url: r.url, name: (names[0] && names[0][1]) || base(r.file) || (r.description || '').slice(0, 80) || r.id,
+      description: r.description, file: r.file, created: r.created, updated: r.updated, publishes: r.publishes, deleted: !!r.deletedAt && r.deletedAt >= r.updated,
+      cwd: ss[0].cwd, accounts: [...new Set(ss.map((x) => x.account))], sessions: ss };
+  }).sort((a, b) => (b.updated || '').localeCompare(a.updated || ''));
+}
+
+function projectsView() {
+  const byCwd = new Map();
+  for (const s of sessions) {
+    let f = byCwd.get(s.cwd);
+    if (!f) { f = { cwd: s.cwd, lastActive: '', accountIds: new Set(), sessions: [] }; byCwd.set(s.cwd, f); }
+    f.accountIds.add(s.account);
+    if (s.cwdKnown === false) f.guessed = true;
+    if (s.end && s.end > f.lastActive) f.lastActive = s.end;
+    f.sessions.push({ account: s.account, id: s.id, title: s.title, firstPrompt: s.firstPrompt, lastMessage: s.lastMessage, end: s.end, messages: s.user + s.assistant, copy: !!s.copyOf });
+  }
+  return [...byCwd.values()].map((f) => {
+    const exists = fs.existsSync(f.cwd);
+    const accs = accounts.filter((a) => f.accountIds.has(a.id));
+    f.sessions.sort((a, b) => (b.end || '').localeCompare(a.end || ''));
+    return { cwd: f.cwd, exists, removable: !exists && !f.guessed, lastActive: f.lastActive, accounts: [...f.accountIds], sessionCount: f.sessions.length, sessions: f.sessions,
+      config: exists ? projectConfig(f.cwd, accs) : null };
+  }).sort((a, b) => b.lastActive.localeCompare(a.lastActive));
 }
 
 const pub = (s) => {
@@ -297,15 +484,20 @@ function sessionsView(q) {
 }
 
 function statsView() {
-  const perDay = {};
+  const perDay = {}, perDayAccount = {}; // copies are not counted: a copied file is not new activity
   const models = {};
   for (const s of sessions) {
-    if (s.end) perDay[s.end.slice(0, 10)] = (perDay[s.end.slice(0, 10)] || 0) + 1;
+    if (s.end && !s.copyOf) {
+      const d = s.end.slice(0, 10);
+      perDay[d] = (perDay[d] || 0) + 1;
+      const pa = perDayAccount[s.account] || (perDayAccount[s.account] = {});
+      pa[d] = (pa[d] || 0) + 1;
+    }
     for (const [m, n] of Object.entries(s.models)) models[m] = (models[m] || 0) + n;
   }
   let cost = 0, tokens = 0, unpriced = new Set();
   for (const s of sessions) { if (s.copyOf) continue; const c = costOf(s.usage); cost += c.usd; c.unpriced.forEach((m) => unpriced.add(m)); tokens += s.tokensIn + s.tokensOut + s.cacheRead + s.cacheWrite; }
-  return { perDay, models, totalSessions: sessions.length, copies: sessions.filter((s) => s.copyOf).length, cost, tokens, unpriced: [...unpriced], pricingUpdated: pricing.updated || null };
+  return { perDay, perDayAccount, models, totalSessions: sessions.length, copies: sessions.filter((s) => s.copyOf).length, cost, tokens, unpriced: [...unpriced], pricingUpdated: pricing.updated || null };
 }
 
 // ---------- transcript ----------
@@ -373,14 +565,26 @@ const json = (res, data, code = 200) => {
 const server = http.createServer(async (req, res) => {
   // DNS-rebinding guard: only answer to localhost host headers
   if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host || '')) { res.writeHead(403); return res.end('forbidden'); }
-  if (req.method !== 'GET') { res.writeHead(405); return res.end(); }
+  const isRemove = req.method === 'POST' && req.url === '/api/remove-missing';
+  if (req.method !== 'GET' && !isRemove) { res.writeHead(405); return res.end(); }
+  if (isRemove) {
+    // CSRF guard: a page on another origin must not be able to trigger this
+    const origin = req.headers.origin;
+    if (!origin || new URL(origin).host !== req.headers.host || !/^application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(403); return res.end('forbidden'); }
+    let body = ''; for await (const ch of req) { body += ch; if (body.length > 1e5) { res.writeHead(413); return res.end(); } }
+    let cwd = null; try { cwd = (JSON.parse(body || '{}').cwd) || null; } catch { res.writeHead(400); return res.end(); }
+    if (indexing.running) return json(res, { error: 'Indexing is running, try again in a moment' }, 409);
+    return json(res, await removeMissing(cwd));
+  }
   const url = new URL(req.url, 'http://localhost');
   const q = Object.fromEntries(url.searchParams);
   try {
     switch (url.pathname) {
-      case '/api/status': return json(res, { indexing, home: HOME });
+      case '/api/status': return json(res, { indexing, home: HOME, trash: TRASH_DIR });
       case '/api/accounts': return json(res, accountsView());
       case '/api/folders': return json(res, foldersView());
+      case '/api/projects': return json(res, projectsView());
+      case '/api/artifacts': return json(res, artifactsView());
       case '/api/sessions': return json(res, sessionsView(q));
       case '/api/stats': return json(res, statsView());
       case '/api/reindex': loadPricing(); buildIndex(); return json(res, { ok: true });
