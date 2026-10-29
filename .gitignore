@@ -5,3 +5,7 @@ node_modules
 *.log
 logs/
 .run/
+.gstack/
+.claude-flow/
+.swarm/
+ruvector.db

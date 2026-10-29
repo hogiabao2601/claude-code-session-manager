@@ -169,6 +169,81 @@ function cfgPills(c, scope = '') {
   }).join('')}</div>`;
 }
 
+async function shared(params) {
+  const q = (params.get('q') || '').toLowerCase(), flat = params.get('group') === 'none', only = params.get('author') || '', sort = params.get('sort') || 'newest';
+  const d = await api('shared');
+  const authorsAll = d.authors, people = d.people;
+  let list = d.items.filter((i) => (!only || (only === '—' ? !i.author : i.author === only)) && (!q || [i.title, i.author, i.id].some((x) => x && x.toLowerCase().includes(q))));
+  const by = { newest: (a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''), oldest: (a, b) => (a.updatedAt || '').localeCompare(b.updatedAt || ''), title: (a, b) => a.title.localeCompare(b.title) }[sort] || (() => 0);
+  list = [...list].sort(by);
+  const kind = (i) => (i.files ? `multi-file · ${i.files} files` : 'single page');
+  const row = (i) => `<div class="row shr">
+      <input type="checkbox" class="sel" data-id="${esc(i.id)}">
+      <div style="min-width:0"><a class="t" href="${esc(i.url)}" target="_blank" rel="noopener" title="Open in claude.ai">${hl(i.title, q)}</a><div class="sub" title="Version ${esc(i.version || '')}">${kind(i)}${i.version ? ' · v' + esc(i.version.split('-')[1] || '') : ''} · <span class="mono">${esc(i.id)}</span></div></div>
+      <div><select class="au" data-id="${esc(i.id)}"><option value="">Unassigned</option>${people.map((p) => `<option ${p === i.author ? 'selected' : ''}>${esc(p)}</option>`).join('')}<option value="__add">+ Add new person…</option></select></div>
+      <div class="right" title="${i.updatedAt ? esc(new Date(i.updatedAt).toLocaleString()) : ''}">${i.updatedAt ? ago(i.updatedAt) : '—'}<div class="muted small">${i.updatedAt ? esc(new Date(i.updatedAt).toLocaleString(undefined, { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' })) : ''}</div></div>
+      <div class="right"><button class="btn small" data-copy="${esc(i.url)}">Copy</button></div>
+    </div>`;
+  const head = '<div class="row shr th"><span></span><span>Artifact</span><span>Author</span><span class="right">Last updated</span><span></span></div>';
+  let body;
+  if (!d.items.length) body = '<div class="table"><div class="empty">No shared artifacts saved yet. Ask Claude: “refresh my shared artifacts”.</div></div>';
+  else if (!list.length) body = '<div class="table"><div class="empty">No shared artifacts match.</div></div>';
+  else if (flat) body = `<div class="table">${head}${list.map(row).join('')}</div>`;
+  else {
+    const g = new Map(); for (const i of list) (g.get(i.author || '') || g.set(i.author || '', []).get(i.author || '')).push(i);
+    const keys = [...g.keys()].sort((a, b) => (a === '') - (b === '') || g.get(b).length - g.get(a).length || a.localeCompare(b));
+    body = keys.map((k) => `<div class="group-h">${k ? esc(k) : 'Unassigned'} <span class="muted small">${g.get(k).length} artifact${g.get(k).length === 1 ? '' : 's'}</span></div><div class="table">${head}${g.get(k).map(row).join('')}</div>`).join('');
+  }
+  app.innerHTML = `
+    <div class="head"><div><h1>Shared with me</h1><div class="muted">${list.length} of ${d.items.length} artifact${d.items.length === 1 ? '' : 's'} shared with you${d.updatedAt ? ' · list saved ' + ago(d.updatedAt) : ''}</div></div>
+      <div class="tools"><input type="search" id="fQ" placeholder="Search title or author…" value="${esc(params.get('q') || '')}">
+        <select id="fAuthor"><option value="">All authors</option><option value="—" ${only === '—' ? 'selected' : ''}>Unassigned</option>${authorsAll.map((a) => `<option ${a === only ? 'selected' : ''}>${esc(a)}</option>`).join('')}</select>
+        <select id="fGroup"><option value="">Group by author</option><option value="none" ${flat ? 'selected' : ''}>Flat list</option></select>
+        <select id="fSort">${[['newest', 'Newest first'], ['oldest', 'Oldest first'], ['title', 'Title A–Z']].map(([v, l]) => `<option value="${v}" ${sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div></div>
+    <p class="muted small">“Last updated” is the time of the artifact's latest published version (claude.ai does not give creation dates). Claude.ai does not tell us who wrote a shared artifact, so set the author yourself: add people to the list once, then pick one in each row, or tick several rows and use “Set author for selected”. Authors are saved on this Mac. The list itself is refreshed by asking Claude: “refresh my shared artifacts”.</p>
+    <div class="people-box"><span class="muted small">People:</span>${people.map((p) => `<span class="tag">${esc(p)}<button data-rmperson="${esc(p)}" title="Remove from the list">×</button></span>`).join('') || '<span class="muted small">none yet</span>'}<button class="btn small" id="addPerson">+ Add person</button></div>
+    <div class="bulk"><label class="muted small"><input type="checkbox" id="selAll"> Select all shown</label>
+      <select id="bulkAuthor"><option value="">Choose person…</option>${people.map((p) => `<option>${esc(p)}</option>`).join('')}</select><button class="btn small" id="bulkApply">Set author for selected</button><button class="btn small" id="bulkClear">Clear author</button></div>
+    ${body}`;
+  const save = async (ids, author) => {
+    const r = await fetch('/api/shared-author', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids, author }) }).then((x) => x.json()).catch((e) => ({ error: String(e) }));
+    if (r.error) return toast(r.error);
+    toast(`Saved (${r.updated})`);
+    return true;
+  };
+  const go = () => {
+    const p = new URLSearchParams();
+    if ($('#fQ').value) p.set('q', $('#fQ').value);
+    if ($('#fAuthor').value) p.set('author', $('#fAuthor').value);
+    if ($('#fGroup').value) p.set('group', $('#fGroup').value);
+    if ($('#fSort').value !== 'newest') p.set('sort', $('#fSort').value);
+    location.hash = `#/shared?${p}`;
+  };
+  $('#fAuthor').onchange = go; $('#fGroup').onchange = go; $('#fSort').onchange = go;
+  let t; $('#fQ').oninput = () => { clearTimeout(t); t = setTimeout(() => { go(); const el = $('#fQ'); el.focus(); el.setSelectionRange(el.value.length, el.value.length); }, 350); };
+  const el = $('#fQ'); if (el.value) { el.focus(); el.setSelectionRange(el.value.length, el.value.length); }
+  const picked = () => [...document.querySelectorAll('.sel:checked')].map((c) => c.dataset.id);
+  $('#selAll').onchange = (e) => document.querySelectorAll('.sel').forEach((c) => { c.checked = e.target.checked; });
+  const postPeople = (body) => fetch('/api/shared-people', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((x) => x.json()).catch((e) => ({ error: String(e) }));
+  const askName = () => { const n = (prompt('Name of the person (as you want it shown):') || '').trim(); return n; };
+  document.querySelectorAll('select.au').forEach((sel) => {
+    sel.onchange = async () => {
+      let v = sel.value;
+      if (v === '__add') { v = askName(); if (!v) return route(); const r = await postPeople({ add: v }); if (r.error) { toast(r.error); return route(); } }
+      if (await save([sel.dataset.id], v)) route();
+    };
+  });
+  $('#addPerson').onclick = async () => { const n = askName(); if (!n) return; const r = await postPeople({ add: n }); if (r.error) toast(r.error); else route(); };
+  document.querySelectorAll('[data-rmperson]').forEach((b) => { b.onclick = async (e) => { e.preventDefault(); e.stopPropagation(); if (!confirm(`Remove ${b.dataset.rmperson} from the list?`)) return; const r = await postPeople({ remove: b.dataset.rmperson }); if (r.error) toast(r.error); else route(); }; });
+  $('#bulkApply').onclick = async () => {
+    const ids = picked(), name = $('#bulkAuthor').value.trim();
+    if (!ids.length) return toast('Tick some rows first');
+    if (!name) return toast('Choose a person first');
+    if (await save(ids, name)) route();
+  };
+  $('#bulkClear').onclick = async () => { const ids = picked(); if (!ids.length) return toast('Tick some rows first'); if (await save(ids, '')) route(); };
+}
+
 async function artifacts(params) {
   const q = (params.get('q') || '').toLowerCase(), acc = params.get('account') || '', cwd = params.get('cwd') || '';
   const group = params.get('group') === 'folder', hideGone = params.get('deleted') !== '1';
@@ -391,6 +466,7 @@ async function route() {
   else if (r === 'folders') await folders(params);
   else if (r === 'projects') await projects(params);
   else if (r === 'artifacts') await artifacts(params);
+  else if (r === 'shared') await shared(params);
   else if (r === 'sessions') await sessions(params);
   else if (r === 'session') await session(parts[1], parts[2]);
   else if (r === 'search') await search(params);

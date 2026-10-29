@@ -410,6 +410,49 @@ async function removeMissing(cwd) {
   return { sessions: count, folders: folders.size, trash: count ? path.join(TRASH_DIR, stamp) : null };
 }
 
+// ---------- artifacts shared with you by the team ----------
+// The list comes from claude.ai (it cannot be read from local files): Claude saves it to shared-artifacts.json
+// when asked to refresh. Claude.ai does not expose the author, so authors are assigned here and kept in
+// shared-authors.json, which a refresh never overwrites.
+const DATA_DIR = path.dirname(CACHE_FILE);
+const SHARED_FILE = path.join(DATA_DIR, 'shared-artifacts.json');
+const AUTHORS_FILE = path.join(DATA_DIR, 'shared-authors.json');
+const PEOPLE_FILE = path.join(DATA_DIR, 'shared-people.json'); // the list of people you pick authors from
+const writeJson = (file, data) => { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(file + '.tmp', JSON.stringify(data, null, 2)); fs.renameSync(file + '.tmp', file); };
+function sharedView() {
+  const snap = readJsonSync(SHARED_FILE) || { items: [] };
+  const authors = readJsonSync(AUTHORS_FILE) || {};
+  const items = (snap.items || []).map((i) => ({ ...i, author: authors[i.id] || '' }));
+  const people = [...new Set([...((readJsonSync(PEOPLE_FILE) || {}).people || []), ...Object.values(authors).filter(Boolean)])].sort((a, b) => a.localeCompare(b));
+  return { updatedAt: snap.updatedAt || null, items, authors: [...new Set(Object.values(authors).filter(Boolean))].sort(), people };
+}
+function setSharedAuthors(ids, author) {
+  if (!Array.isArray(ids) || typeof author !== 'string') return { error: 'bad request' };
+  const known = new Set(((readJsonSync(SHARED_FILE) || {}).items || []).map((i) => i.id));
+  const authors = readJsonSync(AUTHORS_FILE) || {};
+  const name = author.trim().slice(0, 80);
+  let n = 0;
+  for (const id of ids) {
+    if (typeof id !== 'string' || !known.has(id)) continue;
+    if (name) authors[id] = name; else delete authors[id];
+    n++;
+  }
+  if (name) { const reg = readJsonSync(PEOPLE_FILE) || { people: [] }; if (!reg.people.includes(name)) { reg.people.push(name); writeJson(PEOPLE_FILE, reg); } }
+  writeJson(AUTHORS_FILE, authors);
+  return { updated: n };
+}
+function editSharedPeople(add, remove) {
+  const reg = readJsonSync(PEOPLE_FILE) || { people: [] };
+  const used = new Set(Object.values(readJsonSync(AUTHORS_FILE) || {}));
+  if (typeof add === 'string' && add.trim()) { const n = add.trim().slice(0, 80); if (!reg.people.includes(n)) reg.people.push(n); }
+  if (typeof remove === 'string') {
+    if (used.has(remove)) return { error: `${remove} is still the author of some artifacts. Clear those first.` };
+    reg.people = reg.people.filter((p) => p !== remove);
+  }
+  writeJson(PEOPLE_FILE, reg);
+  return { ok: true };
+}
+
 // ---------- artifacts published from sessions ----------
 function artifactsView() {
   const byId = new Map();
@@ -565,14 +608,17 @@ const json = (res, data, code = 200) => {
 const server = http.createServer(async (req, res) => {
   // DNS-rebinding guard: only answer to localhost host headers
   if (!/^(localhost|127\.0\.0\.1)(:\d+)?$/.test(req.headers.host || '')) { res.writeHead(403); return res.end('forbidden'); }
-  const isRemove = req.method === 'POST' && req.url === '/api/remove-missing';
-  if (req.method !== 'GET' && !isRemove) { res.writeHead(405); return res.end(); }
-  if (isRemove) {
+  const isPost = req.method === 'POST' && ['/api/remove-missing', '/api/shared-author', '/api/shared-people'].includes(req.url);
+  if (req.method !== 'GET' && !isPost) { res.writeHead(405); return res.end(); }
+  if (isPost) {
     // CSRF guard: a page on another origin must not be able to trigger this
     const origin = req.headers.origin;
     if (!origin || new URL(origin).host !== req.headers.host || !/^application\/json/.test(req.headers['content-type'] || '')) { res.writeHead(403); return res.end('forbidden'); }
     let body = ''; for await (const ch of req) { body += ch; if (body.length > 1e5) { res.writeHead(413); return res.end(); } }
-    let cwd = null; try { cwd = (JSON.parse(body || '{}').cwd) || null; } catch { res.writeHead(400); return res.end(); }
+    let data = {}; try { data = JSON.parse(body || '{}'); } catch { res.writeHead(400); return res.end(); }
+    if (req.url === '/api/shared-author') return json(res, setSharedAuthors(data.ids, data.author));
+    if (req.url === '/api/shared-people') return json(res, editSharedPeople(data.add, data.remove));
+    const cwd = data.cwd || null;
     if (indexing.running) return json(res, { error: 'Indexing is running, try again in a moment' }, 409);
     return json(res, await removeMissing(cwd));
   }
@@ -585,6 +631,7 @@ const server = http.createServer(async (req, res) => {
       case '/api/folders': return json(res, foldersView());
       case '/api/projects': return json(res, projectsView());
       case '/api/artifacts': return json(res, artifactsView());
+      case '/api/shared': return json(res, sharedView());
       case '/api/sessions': return json(res, sessionsView(q));
       case '/api/stats': return json(res, statsView());
       case '/api/reindex': loadPricing(); buildIndex(); return json(res, { ok: true });
